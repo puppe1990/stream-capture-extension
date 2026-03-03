@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Media Capture</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Media Capture</h1>
+        <p class="subtitle">Starter extension</p>
+      </header>
+
+      <section class="panel">
+        <label for="plan">Plan</label>
+        <div class="row">
+          <select id="plan">
+            <option value="premium">premium</option>
+            <option value="enterprise">enterprise</option>
+          </select>
+          <button id="save-plan">Save</button>
+        </div>
+        <p id="plan-status" class="hint"></p>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <button id="scan">Scan Current Tab</button>
+          <button id="clear-media">Clear Saved Media</button>
+        </div>
+        <p class="hint" id="scan-status"></p>
+        <ul id="media-list"></ul>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <button id="refresh-jobs">Refresh Jobs</button>
+        </div>
+        <div class="row row-wrap">
+          <button id="clear-completed">Clear Completed</button>
+          <button id="clear-failed-cancelled">Clear Failed/Cancelled</button>
+          <button id="clear-terminal">Clear All Terminal</button>
+        </div>
+        <div class="row">
+          <label for="retention-days">Retention (days)</label>
+          <input id="retention-days" type="number" min="0" max="365" />
+          <button id="save-retention">Save</button>
+        </div>
+        <p class="hint" id="jobs-status"></p>
+        <ul id="job-list"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>

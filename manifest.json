@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Media Capture Starter",
+  "version": "0.1.0",
+  "description": "Starter extension for media detection and download workflows.",
+  "permissions": [
+    "storage",
+    "downloads",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Media Capture",
+    "default_popup": "src/popup/popup.html"
+  },
+  "options_page": "src/options/options.html",
+  "icons": {
+    "16": "assets/icons/icon.png",
+    "48": "assets/icons/icon.png",
+    "128": "assets/icons/icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/content/detector.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

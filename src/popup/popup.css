@@ -1,0 +1,193 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 360px;
+  background: #f6f7fb;
+  color: #1a1d24;
+}
+
+main {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.subtitle {
+  margin: 2px 0 0;
+  color: #596176;
+  font-size: 12px;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #e1e4ec;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+label {
+  font-size: 12px;
+  display: block;
+  margin-bottom: 6px;
+  color: #4c5468;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+.row-wrap {
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+select,
+button,
+input {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid #ccd3e0;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+button {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.05);
+}
+
+.hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #596176;
+}
+
+#media-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: grid;
+  gap: 8px;
+}
+
+#media-list li,
+#job-list li {
+  border: 1px solid #e1e4ec;
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 12px;
+  background: #fafbff;
+}
+
+#media-list .title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+#media-list .title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+#media-list .meta {
+  margin-bottom: 8px;
+  color: #596176;
+  word-break: break-all;
+}
+
+#media-list .download {
+  width: 100%;
+}
+
+#media-list .blob-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #f5c56a;
+  color: #2b1a00;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#job-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: grid;
+  gap: 8px;
+}
+
+.job-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.pill {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #1d2738;
+  background: #d9e2f2;
+}
+
+.pill.downloading {
+  background: #cfe7ff;
+}
+
+.pill.queued {
+  background: #f5e0b6;
+}
+
+.pill.completed {
+  background: #cfeecf;
+}
+
+.pill.failed,
+.pill.cancelled {
+  background: #f7caca;
+}
+
+.job-actions {
+  margin-top: 8px;
+}
+
+.job-actions + .job-actions {
+  margin-top: 6px;
+}
+
+.danger {
+  width: 100%;
+  background: #b62727;
+  border-color: #b62727;
+}
+
+.secondary {
+  width: 100%;
+  background: #4b5568;
+  border-color: #4b5568;
+}
+
+#retention-days {
+  width: 84px;
+}
