@@ -25,6 +25,7 @@ const MAX_PERSISTED_JOBS = 300;
 const MAX_MEDIA_CATALOG_ITEMS = 1000;
 const RESTART_ERROR = "service_worker_restarted";
 const BLOB_TRANSFER_PORT_NAME = "MEDIA_CAPTURE_BLOB_TRANSFER";
+const DOWNLOAD_WORKER_PATH = "src/download-worker/main.js";
 
 const jobs = new Map();
 const queue = [];
@@ -35,10 +36,55 @@ const pendingPageJobTimers = new Map();
 const jobControllers = new Map();
 const jobBlobUrls = new Map();
 const mediaCatalog = new Map();
+const workerPendingRequests = new Map();
+const NETWORK_MEDIA_TYPES = new Set([
+  "media",
+  "video/mp4",
+  "video/webm",
+  "video/ogg",
+  "video/quicktime",
+  "video/x-matroska",
+  "video/mp2t",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/aac",
+  "audio/wav",
+  "audio/webm",
+  "audio/ogg",
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegurl",
+  "application/dash+xml"
+]);
+const NETWORK_MEDIA_EXTENSIONS = new Set([
+  "mp4",
+  "m4v",
+  "m4a",
+  "mp3",
+  "webm",
+  "ogg",
+  "ogv",
+  "wav",
+  "aac",
+  "mov",
+  "mkv",
+  "ts",
+  "m3u8",
+  "mpd"
+]);
+const GENERIC_FILENAMES = new Set([
+  "download",
+  "video",
+  "audio",
+  "media",
+  "file",
+  "videoplayback",
+  "playlist"
+]);
 
 let initialized = false;
 let persistTimer = null;
 let retentionDays = DEFAULT_RETENTION_DAYS;
+let downloadWorker = null;
 const initPromise = initializeState();
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -47,6 +93,17 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({ plan: defaultPlan });
   }
 });
+
+chrome.webRequest.onResponseStarted.addListener(
+  (details) => {
+    void captureNetworkMedia(details);
+  },
+  {
+    urls: ["<all_urls>"],
+    types: ["media", "xmlhttprequest", "other"]
+  },
+  ["responseHeaders"]
+);
 
 chrome.downloads.onChanged.addListener((delta) => {
   const jobId = downloadToJob.get(delta.id);
@@ -135,6 +192,46 @@ async function initializeState() {
   pumpQueue();
 }
 
+async function captureNetworkMedia(details) {
+  const item = normalizeNetworkMedia(details);
+  if (!item) {
+    return;
+  }
+
+  const tabId = details.tabId;
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    return;
+  }
+
+  let tabTitle = "";
+  let tabUrl = "";
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    tabTitle = typeof tab?.title === "string" ? tab.title : "";
+    tabUrl = typeof tab?.url === "string" ? tab.url : "";
+  } catch {
+    // Ignore closed tabs.
+  }
+
+  const now = Date.now();
+  const id = buildCatalogId(tabId, item.url);
+  const existing = mediaCatalog.get(id);
+  mediaCatalog.set(id, {
+    id,
+    tabId,
+    tabTitle,
+    tabUrl,
+    kind: item.kind,
+    title: item.title || tabTitle || "Network media",
+    url: item.url,
+    filename: item.filename,
+    firstSeenAt: existing?.firstSeenAt ?? now,
+    lastSeenAt: now
+  });
+  trimMediaCatalog();
+  schedulePersist();
+}
+
 async function handleMessage(message) {
   switch (message?.type) {
     case MessageType.Ping:
@@ -181,7 +278,11 @@ async function enqueueDownload(url, filename, tabId) {
     throw new Error("Missing download URL");
   }
 
-  if (isBlobUrl(url)) {
+  const preferredSource = choosePreferredDownloadSource(url, tabId);
+  const effectiveUrl = preferredSource?.url || url;
+  const effectiveFilename = preferredSource?.filename || filename;
+
+  if (isBlobUrl(effectiveUrl)) {
     if (!Number.isInteger(tabId)) {
       throw new Error("blob_tab_missing_rescan_required");
     }
@@ -196,8 +297,8 @@ async function enqueueDownload(url, filename, tabId) {
   const jobId = `job_${crypto.randomUUID()}`;
   const job = {
     jobId,
-    url,
-    filename: sanitizeFilename(filename),
+    url: effectiveUrl,
+    filename: sanitizeFilename(effectiveFilename),
     tabId: Number.isInteger(tabId) ? tabId : null,
     mode: null,
     status: JobStatus.Queued,
@@ -361,9 +462,26 @@ function recordMediaDetections(payload) {
 }
 
 function getMediaCatalogList() {
-  return Array.from(mediaCatalog.values())
+  const sortedItems = Array.from(mediaCatalog.values())
     .sort((a, b) => b.lastSeenAt - a.lastSeenAt)
     .map((item) => ({ ...item }));
+
+  const preferredByTab = new Map();
+  for (const item of sortedItems) {
+    const existing = preferredByTab.get(item.tabId);
+    if (!existing || getMediaSourcePriority(item) < getMediaSourcePriority(existing)) {
+      preferredByTab.set(item.tabId, item);
+    }
+  }
+
+  return sortedItems.filter((item) => {
+    if (!isBlobUrl(item.url)) {
+      return true;
+    }
+
+    const preferred = preferredByTab.get(item.tabId);
+    return !preferred || isBlobUrl(preferred.url);
+  });
 }
 
 async function getMediaCatalogListValidated() {
@@ -429,13 +547,21 @@ async function startJob(job) {
   try {
     if (isBlobUrl(job.url)) {
       await refreshBlobUrlFromTab(job);
-      job.mode = "extension-blob";
-      const downloadId = await downloadBlobInsideExtension(job);
-      job.downloadId = downloadId;
-      job.updatedAt = Date.now();
-      downloadToJob.set(downloadId, job.jobId);
-      schedulePersist();
-      return;
+
+      try {
+        job.mode = "page-blob";
+        await triggerPageDownload(job);
+        registerPendingPageJob(job);
+        return;
+      } catch {
+        job.mode = "extension-blob";
+        const downloadId = await downloadBlobInsideExtension(job);
+        job.downloadId = downloadId;
+        job.updatedAt = Date.now();
+        downloadToJob.set(downloadId, job.jobId);
+        schedulePersist();
+        return;
+      }
     }
 
     job.mode = "extension";
@@ -485,6 +611,10 @@ async function downloadInsideExtension(job) {
   jobControllers.set(job.jobId, controller);
 
   try {
+    if (looksLikeHlsSource(job.url, job.filename)) {
+      return await downloadM3u8InsideExtension(job, controller.signal);
+    }
+
     const response = await fetch(job.url, {
       method: "GET",
       credentials: "include",
@@ -533,9 +663,11 @@ async function downloadInsideExtension(job) {
 
     const contentType = response.headers.get("content-type") || "application/octet-stream";
     const blob = new Blob(chunks, { type: contentType });
-    const dataUrl = await blobToDataUrl(blob);
+    const blobUrl = await createWorkerBlobUrl(blob);
+    jobBlobUrls.set(job.jobId, blobUrl);
+
     return await chrome.downloads.download({
-      url: dataUrl,
+      url: blobUrl,
       filename: job.filename,
       saveAs: false,
       conflictAction: "uniquify"
@@ -543,6 +675,64 @@ async function downloadInsideExtension(job) {
   } finally {
     jobControllers.delete(job.jobId);
   }
+}
+
+async function downloadM3u8InsideExtension(job, signal) {
+  const playlist = await loadResolvedHlsPlaylist(job.url, signal);
+  const segmentUrls = parseMediaPlaylistSegments(playlist.url, playlist.text);
+  if (!segmentUrls.length) {
+    throw new Error("hls_no_segments_found");
+  }
+
+  if (hasEncryptedSegments(playlist.text)) {
+    throw new Error("hls_encrypted_not_supported");
+  }
+
+  const chunks = [];
+  let received = 0;
+
+  job.mode = "extension-hls";
+  job.totalBytes = 0;
+  job.bytesReceived = 0;
+  job.progress = 0;
+  schedulePersist();
+
+  for (let index = 0; index < segmentUrls.length; index += 1) {
+    const segmentUrl = segmentUrls[index];
+    const response = await fetch(segmentUrl, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+      signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`hls_segment_network_${response.status}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    chunks.push(bytes);
+    received += bytes.byteLength;
+
+    job.bytesReceived = received;
+    job.progress = Math.min(95, Math.round(((index + 1) / segmentUrls.length) * 95));
+    job.updatedAt = Date.now();
+    schedulePersist();
+  }
+
+  const blob = new Blob(chunks, { type: "video/mp2t" });
+  const blobUrl = await createWorkerBlobUrl(blob);
+  jobBlobUrls.set(job.jobId, blobUrl);
+  job.totalBytes = received;
+  job.bytesReceived = received;
+
+  return await chrome.downloads.download({
+    url: blobUrl,
+    filename: toHlsOutputFilename(job.filename, playlist.url),
+    saveAs: false,
+    conflictAction: "uniquify"
+  });
 }
 
 async function downloadBlobInsideExtension(job) {
@@ -554,17 +744,18 @@ async function downloadBlobInsideExtension(job) {
   jobControllers.set(job.jobId, controller);
 
   try {
-    await ensureDetectorInjected(job.tabId);
-    const { blob, totalBytes } = await receiveBlobFromTab(job, controller.signal);
+    const { blob, totalBytes } = await receiveBlobFromPage(job, controller.signal);
     job.totalBytes = totalBytes;
     job.bytesReceived = totalBytes;
     job.progress = 95;
     job.updatedAt = Date.now();
     schedulePersist();
 
-    const dataUrl = await blobToDataUrl(blob);
+    const blobUrl = await createWorkerBlobUrl(blob);
+    jobBlobUrls.set(job.jobId, blobUrl);
+
     return await chrome.downloads.download({
-      url: dataUrl,
+      url: blobUrl,
       filename: job.filename,
       saveAs: false,
       conflictAction: "uniquify"
@@ -572,6 +763,59 @@ async function downloadBlobInsideExtension(job) {
   } finally {
     jobControllers.delete(job.jobId);
   }
+}
+
+async function receiveBlobFromPage(job, signal) {
+  try {
+    return await receiveBlobFromMainWorld(job, signal);
+  } catch {
+    await ensureDetectorInjected(job.tabId);
+    return await receiveBlobFromTab(job, signal);
+  }
+}
+
+async function receiveBlobFromMainWorld(job, signal) {
+  if (signal?.aborted) {
+    throw new Error("download_cancelled");
+  }
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: job.tabId },
+    world: "MAIN",
+    args: [job.url],
+    func: async (url) => {
+      if (!url || typeof url !== "string" || !url.startsWith("blob:")) {
+        throw new Error("invalid_blob_url");
+      }
+
+      const response = await fetch(url, {
+        method: "GET",
+        cache: "no-store"
+      });
+
+      if (!response.ok) {
+        throw new Error(`blob_fetch_failed_${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const arrayBuffer = await blob.arrayBuffer();
+      return {
+        arrayBuffer,
+        totalBytes: blob.size,
+        contentType: blob.type || "application/octet-stream"
+      };
+    }
+  });
+
+  const arrayBuffer = result?.arrayBuffer;
+  if (!(arrayBuffer instanceof ArrayBuffer)) {
+    throw new Error("blob_main_world_missing_buffer");
+  }
+
+  return {
+    blob: new Blob([arrayBuffer], { type: result?.contentType || "application/octet-stream" }),
+    totalBytes: Number(result?.totalBytes) || arrayBuffer.byteLength
+  };
 }
 
 async function receiveBlobFromTab(job, signal) {
@@ -717,6 +961,39 @@ async function receiveBlobFromTab(job, signal) {
 async function triggerPageDownload(job) {
   if (!Number.isInteger(job.tabId)) {
     throw new Error("page_context_download_requires_tab");
+  }
+
+  if (isBlobUrl(job.url)) {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: job.tabId },
+      world: "MAIN",
+      args: [job.url, job.filename],
+      func: (url, filename) => {
+        if (!url || typeof url !== "string") {
+          throw new Error("invalid_download_url");
+        }
+
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = typeof filename === "string" && filename.length > 0 ? filename : "media.bin";
+        anchor.rel = "noopener";
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+
+        return { effectiveUrl: url };
+      }
+    });
+
+    if (!result?.effectiveUrl) {
+      throw new Error("page_context_download_failed");
+    }
+
+    job.url = result.effectiveUrl;
+    job.updatedAt = Date.now();
+    schedulePersist();
+    return;
   }
 
   const response = await sendMessageToTabWithInjection(job.tabId, {
@@ -1013,7 +1290,11 @@ function sanitizeFilename(filename) {
     return undefined;
   }
 
-  return filename.replace(/[\\/:*?"<>|]+/g, "_").slice(0, 180);
+  return filename
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
 }
 
 function normalizeDetectedMedia(item) {
@@ -1029,7 +1310,12 @@ function normalizeDetectedMedia(item) {
     url: item.url,
     kind: typeof item.kind === "string" ? item.kind : "media",
     title: typeof item.title === "string" ? item.title : "Untitled",
-    filename: sanitizeFilename(item.filename)
+    filename: resolveDownloadFilename({
+      kind: typeof item.kind === "string" ? item.kind : "media",
+      title: typeof item.title === "string" ? item.title : "Untitled",
+      url: item.url,
+      candidate: item.filename
+    })
   };
 }
 
@@ -1051,7 +1337,12 @@ function normalizeCatalogItem(raw) {
     kind: typeof raw.kind === "string" ? raw.kind : "media",
     title: typeof raw.title === "string" ? raw.title : "Untitled",
     url: raw.url,
-    filename: sanitizeFilename(raw.filename),
+    filename: resolveDownloadFilename({
+      kind: typeof raw.kind === "string" ? raw.kind : "media",
+      title: typeof raw.title === "string" ? raw.title : "Untitled",
+      url: raw.url,
+      candidate: raw.filename
+    }),
     firstSeenAt: typeof raw.firstSeenAt === "number" ? raw.firstSeenAt : now,
     lastSeenAt: typeof raw.lastSeenAt === "number" ? raw.lastSeenAt : now
   };
@@ -1071,6 +1362,489 @@ function trimMediaCatalog() {
   for (const item of ordered.slice(0, MAX_MEDIA_CATALOG_ITEMS)) {
     mediaCatalog.set(item.id, item);
   }
+}
+
+function choosePreferredDownloadSource(url, tabId) {
+  if (!Number.isInteger(tabId)) {
+    return null;
+  }
+
+  const sameTabItems = Array.from(mediaCatalog.values()).filter((item) => item.tabId === tabId);
+  if (!sameTabItems.length) {
+    return null;
+  }
+
+  const normalizedItems = sameTabItems
+    .filter((item) => item && typeof item.url === "string")
+    .sort((left, right) => {
+      const scoreDiff = getMediaSourcePriority(left) - getMediaSourcePriority(right);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return right.lastSeenAt - left.lastSeenAt;
+    });
+
+  if (typeof url === "string" && !isBlobUrl(url)) {
+    const exact = normalizedItems.find((item) => item.url === url);
+    return exact || null;
+  }
+
+  const preferred = normalizedItems.find((item) => !isBlobUrl(item.url) && getMediaSourcePriority(item) < 90);
+  return preferred || null;
+}
+
+function getMediaSourcePriority(item) {
+  switch (item?.kind) {
+    case "hls":
+      return 0;
+    case "dash":
+      return 1;
+    case "video":
+      return 2;
+    case "audio":
+      return 3;
+    case "source":
+      return 4;
+    case "media":
+      return 5;
+    default:
+      return isBlobUrl(item?.url) ? 99 : 50;
+  }
+}
+
+function normalizeNetworkMedia(details) {
+  if (!details || typeof details.url !== "string" || details.url.length === 0) {
+    return null;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(details.url);
+  } catch {
+    return null;
+  }
+
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    return null;
+  }
+
+  const contentType = getHeaderValue(details.responseHeaders, "content-type");
+  const disposition = getHeaderValue(details.responseHeaders, "content-disposition");
+  const pathnameTail = parsedUrl.pathname.split("/").pop() || "";
+  const extension = getPathExtension(pathnameTail);
+  const normalizedType = normalizeMime(contentType);
+  const looksLikeMedia =
+    details.type === "media" ||
+    NETWORK_MEDIA_TYPES.has(normalizedType) ||
+    NETWORK_MEDIA_EXTENSIONS.has(extension);
+
+  if (!looksLikeMedia) {
+    return null;
+  }
+
+  const filename =
+    resolveDownloadFilename({
+      kind: inferKind(normalizedType, extension),
+      title: decodeURIComponentSafe(pathnameTail) || parsedUrl.hostname,
+      url: parsedUrl.href,
+      candidate:
+        sanitizeFilename(extractFilenameFromContentDisposition(disposition)) ||
+        sanitizeFilename(decodeURIComponentSafe(pathnameTail)) ||
+        sanitizeFilename(buildFilenameFromUrl(parsedUrl, normalizedType, extension))
+    }) || sanitizeFilename(`media-${Date.now()}`);
+
+  return {
+    url: parsedUrl.href,
+    kind: inferKind(normalizedType, extension),
+    title: filename,
+    filename
+  };
+}
+
+function looksLikeHlsSource(url, filename) {
+  const candidates = [url, filename].filter((value) => typeof value === "string" && value.length > 0);
+  return candidates.some((value) => {
+    const lowered = value.toLowerCase();
+    return lowered.includes(".m3u8") || lowered.includes("mpegurl");
+  });
+}
+
+async function loadResolvedHlsPlaylist(entryUrl, signal) {
+  const firstPlaylist = await fetchPlaylistText(entryUrl, signal);
+  if (!isMasterPlaylist(firstPlaylist.text)) {
+    return firstPlaylist;
+  }
+
+  const variantUrl = selectPreferredHlsVariant(firstPlaylist.url, firstPlaylist.text);
+  if (!variantUrl) {
+    throw new Error("hls_master_without_variant");
+  }
+
+  return await fetchPlaylistText(variantUrl, signal);
+}
+
+async function fetchPlaylistText(url, signal) {
+  const response = await fetch(url, {
+    method: "GET",
+    credentials: "include",
+    cache: "no-store",
+    signal
+  });
+
+  if (!response.ok) {
+    throw new Error(`hls_playlist_network_${response.status}`);
+  }
+
+  return {
+    url: response.url || url,
+    text: await response.text()
+  };
+}
+
+function isMasterPlaylist(text) {
+  return typeof text === "string" && text.includes("#EXT-X-STREAM-INF");
+}
+
+function selectPreferredHlsVariant(baseUrl, text) {
+  const lines = splitPlaylistLines(text);
+  const variants = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.startsWith("#EXT-X-STREAM-INF")) {
+      continue;
+    }
+
+    const nextLine = lines[index + 1];
+    if (!nextLine || nextLine.startsWith("#")) {
+      continue;
+    }
+
+    variants.push({
+      url: toAbsolutePlaylistUrl(baseUrl, nextLine),
+      bandwidth: parseHlsBandwidth(line)
+    });
+  }
+
+  if (!variants.length) {
+    return null;
+  }
+
+  variants.sort((a, b) => b.bandwidth - a.bandwidth);
+  return variants[0].url;
+}
+
+function parseHlsBandwidth(streamInfLine) {
+  const match = streamInfLine.match(/BANDWIDTH=(\d+)/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function parseMediaPlaylistSegments(baseUrl, text) {
+  const lines = splitPlaylistLines(text);
+  const segments = [];
+
+  for (const line of lines) {
+    if (line.startsWith("#EXT-X-MAP:")) {
+      const attributes = parseHlsAttributeList(line.slice("#EXT-X-MAP:".length));
+      if (attributes.URI) {
+        segments.push(toAbsolutePlaylistUrl(baseUrl, attributes.URI));
+      }
+      continue;
+    }
+
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    segments.push(toAbsolutePlaylistUrl(baseUrl, line));
+  }
+
+  return segments;
+}
+
+function splitPlaylistLines(text) {
+  if (typeof text !== "string") {
+    return [];
+  }
+
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function toAbsolutePlaylistUrl(baseUrl, path) {
+  return new URL(path, baseUrl).href;
+}
+
+function hasEncryptedSegments(text) {
+  if (typeof text !== "string") {
+    return false;
+  }
+
+  return text
+    .split(/\r?\n/)
+    .some((line) => line.startsWith("#EXT-X-KEY") && !/METHOD=NONE/i.test(line));
+}
+
+function parseHlsAttributeList(value) {
+  const attributes = {};
+  if (typeof value !== "string" || value.length === 0) {
+    return attributes;
+  }
+
+  const matches = value.match(/([A-Z0-9-]+)=((\"[^\"]*\")|[^,]+)/gi) || [];
+  for (const match of matches) {
+    const separatorIndex = match.indexOf("=");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = match.slice(0, separatorIndex).trim();
+    const raw = match.slice(separatorIndex + 1).trim();
+    attributes[key] = raw.replace(/^"|"$/g, "");
+  }
+
+  return attributes;
+}
+
+function toHlsOutputFilename(filename, playlistUrl) {
+  const preferred =
+    resolveDownloadFilename({
+      kind: "hls",
+      title: filename || filenameFromUrl(playlistUrl) || "stream",
+      url: playlistUrl,
+      candidate: filename
+    }) || "stream.ts";
+  return sanitizeFilename(stripPlaylistSuffix(preferred)) || "stream.ts";
+}
+
+function filenameFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return decodeURIComponentSafe(parsed.pathname.split("/").pop() || "");
+  } catch {
+    return "";
+  }
+}
+
+function replaceFilenameExtension(filename, nextExtension) {
+  if (typeof filename !== "string" || filename.length === 0) {
+    return `media.${nextExtension}`;
+  }
+
+  const normalizedExtension = String(nextExtension || "bin").replace(/^\.+/, "");
+  const withoutQuery = filename.split("?")[0];
+  const nextName = withoutQuery.replace(/\.[^./]+$/, "");
+  return `${nextName || "media"}.${normalizedExtension}`;
+}
+
+function stripPlaylistSuffix(filename) {
+  if (typeof filename !== "string" || filename.length === 0) {
+    return "stream.ts";
+  }
+
+  let next = filename.split("?")[0];
+  next = next.replace(/\.m3u8$/i, "");
+  next = next.replace(/\.mpd$/i, "");
+  next = next.replace(/\.(mp4|m4v|webm|mov|mkv)\.(m3u8|mpd)$/i, ".$1");
+
+  if (!/\.(ts|mp4|m4v|webm|mov|mkv)$/i.test(next)) {
+    next = `${next}.ts`;
+  } else if (!/\.ts$/i.test(next)) {
+    next = replaceFilenameExtension(next, "ts");
+  }
+
+  return next;
+}
+
+function resolveDownloadFilename({ kind, title, url, candidate }) {
+  const normalizedKind = typeof kind === "string" ? kind : "media";
+  const ext = getPreferredExtensionForKind(normalizedKind, url);
+  const options = [
+    sanitizeFilename(candidate),
+    sanitizeFilename(filenameFromUrl(url)),
+    sanitizeFilename(titleToFilename(title)),
+    sanitizeFilename(`media-${Date.now()}`)
+  ].filter(Boolean);
+
+  const preferred = options.find((value) => !isGenericFilename(value)) || options[0];
+  if (!preferred) {
+    return undefined;
+  }
+
+  return ensureFilenameExtension(preferred, ext);
+}
+
+function titleToFilename(title) {
+  if (typeof title !== "string" || title.trim().length === 0) {
+    return "";
+  }
+
+  return title
+    .replace(/\s*[|_-]\s*[^|_-]+$/g, "")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .trim();
+}
+
+function isGenericFilename(filename) {
+  if (typeof filename !== "string" || filename.length === 0) {
+    return true;
+  }
+
+  const withoutExtension = filename.replace(/\.[^./]+$/, "").trim().toLowerCase();
+  return GENERIC_FILENAMES.has(withoutExtension);
+}
+
+function ensureFilenameExtension(filename, extension) {
+  const safeName = sanitizeFilename(filename);
+  if (!safeName) {
+    return undefined;
+  }
+
+  const normalizedExtension = String(extension || "").replace(/^\.+/, "").toLowerCase();
+  if (!normalizedExtension) {
+    return safeName;
+  }
+
+  if (safeName.toLowerCase().endsWith(`.${normalizedExtension}`)) {
+    return safeName;
+  }
+
+  return replaceFilenameExtension(safeName, normalizedExtension);
+}
+
+function getPreferredExtensionForKind(kind, url) {
+  const fromUrl = getPathExtension(filenameFromUrl(url));
+  if (kind === "hls") {
+    return "ts";
+  }
+  if (kind === "dash") {
+    return fromUrl || "mp4";
+  }
+  if (kind === "video") {
+    return fromUrl || "mp4";
+  }
+  if (kind === "audio") {
+    return fromUrl || "mp3";
+  }
+  return fromUrl || "";
+}
+
+function getHeaderValue(headers, name) {
+  if (!Array.isArray(headers)) {
+    return "";
+  }
+
+  const loweredName = name.toLowerCase();
+  const match = headers.find((header) => String(header?.name || "").toLowerCase() === loweredName);
+  return typeof match?.value === "string" ? match.value : "";
+}
+
+function normalizeMime(contentType) {
+  if (typeof contentType !== "string") {
+    return "";
+  }
+
+  return contentType.split(";")[0].trim().toLowerCase();
+}
+
+function getPathExtension(filename) {
+  if (typeof filename !== "string" || filename.length === 0) {
+    return "";
+  }
+
+  const clean = filename.split("?")[0];
+  const parts = clean.split(".");
+  return parts.length > 1 ? parts.pop().toLowerCase() : "";
+}
+
+function extractFilenameFromContentDisposition(disposition) {
+  if (typeof disposition !== "string" || disposition.length === 0) {
+    return "";
+  }
+
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    return decodeURIComponentSafe(utf8Match[1]);
+  }
+
+  const basicMatch = disposition.match(/filename="?([^";]+)"?/i);
+  return basicMatch?.[1] || "";
+}
+
+function decodeURIComponentSafe(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    return "";
+  }
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function buildFilenameFromUrl(url, normalizedType, extension) {
+  const inferredExtension = extension || getExtensionFromMime(normalizedType) || "bin";
+  const baseName = url.hostname.replace(/[\\/:*?"<>|]+/g, "_");
+  return `${baseName}-${Date.now()}.${inferredExtension}`;
+}
+
+function getExtensionFromMime(normalizedType) {
+  switch (normalizedType) {
+    case "video/mp4":
+      return "mp4";
+    case "video/webm":
+      return "webm";
+    case "video/ogg":
+      return "ogv";
+    case "video/quicktime":
+      return "mov";
+    case "video/x-matroska":
+      return "mkv";
+    case "video/mp2t":
+      return "ts";
+    case "audio/mpeg":
+      return "mp3";
+    case "audio/mp4":
+      return "m4a";
+    case "audio/aac":
+      return "aac";
+    case "audio/wav":
+      return "wav";
+    case "audio/webm":
+      return "webm";
+    case "audio/ogg":
+      return "ogg";
+    case "application/vnd.apple.mpegurl":
+    case "application/x-mpegurl":
+      return "m3u8";
+    case "application/dash+xml":
+      return "mpd";
+    default:
+      return "";
+  }
+}
+
+function inferKind(normalizedType, extension) {
+  if (normalizedType.startsWith("audio/")) {
+    return "audio";
+  }
+
+  if (
+    normalizedType === "application/vnd.apple.mpegurl" ||
+    normalizedType === "application/x-mpegurl" ||
+    extension === "m3u8"
+  ) {
+    return "hls";
+  }
+
+  if (normalizedType === "application/dash+xml" || extension === "mpd") {
+    return "dash";
+  }
+
+  return "video";
 }
 
 function clearJobController(jobId) {
@@ -1093,11 +1867,7 @@ function revokeJobBlobUrl(jobId) {
     return;
   }
 
-  try {
-    URL.revokeObjectURL(blobUrl);
-  } catch {
-    // ignore
-  }
+  void revokeWorkerBlobUrl(blobUrl);
   jobBlobUrls.delete(jobId);
 }
 
@@ -1155,7 +1925,7 @@ function createInterruptedFailure(job, interruptedCode) {
     typeof interruptedCode === "string" && interruptedCode.length > 0 ? interruptedCode : "interrupted";
   const normalizedCode = rawCode.toUpperCase();
 
-  if (job.mode === "page-blob" && normalizedCode === "NETWORK_FAILED") {
+  if ((job.mode === "page-blob" || job.mode === "extension-blob") && normalizedCode === "NETWORK_FAILED") {
     return toFailure({
       stage: "browser-download",
       code: "page_blob_network_failed",
@@ -1206,6 +1976,115 @@ function safeJsonStringify(value) {
   } catch {
     return String(value);
   }
+}
+
+async function createWorkerBlobUrl(blob) {
+  if (typeof Worker === "undefined") {
+    return await blobToDataUrl(blob);
+  }
+
+  const mime = blob.type || "application/octet-stream";
+  const arrayBuffer = await blob.arrayBuffer();
+  const result = await callDownloadWorker(
+    {
+      type: "CREATE_BLOB_URL",
+      mime,
+      arrayBuffer
+    },
+    [arrayBuffer]
+  );
+
+  if (!result?.blobUrl || typeof result.blobUrl !== "string") {
+    throw new Error("worker_blob_url_missing");
+  }
+
+  return result.blobUrl;
+}
+
+async function revokeWorkerBlobUrl(blobUrl) {
+  if (!blobUrl || typeof blobUrl !== "string") {
+    return;
+  }
+
+  // data: URLs do not need explicit revocation.
+  if (blobUrl.startsWith("data:")) {
+    return;
+  }
+
+  if (typeof Worker === "undefined") {
+    return;
+  }
+
+  try {
+    await callDownloadWorker({ type: "REVOKE_BLOB_URL", blobUrl });
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
+function getDownloadWorker() {
+  if (typeof Worker === "undefined") {
+    throw new Error("worker_api_unavailable");
+  }
+
+  if (downloadWorker) {
+    return downloadWorker;
+  }
+
+  const workerUrl = chrome.runtime.getURL(DOWNLOAD_WORKER_PATH);
+  downloadWorker = new Worker(workerUrl, { type: "module" });
+  downloadWorker.addEventListener("message", (event) => {
+    const message = event.data || {};
+    const requestId = message.requestId;
+    if (!requestId || !workerPendingRequests.has(requestId)) {
+      return;
+    }
+
+    const pending = workerPendingRequests.get(requestId);
+    workerPendingRequests.delete(requestId);
+    clearTimeout(pending.timeoutId);
+
+    if (message.ok) {
+      pending.resolve(message.result || null);
+      return;
+    }
+
+    pending.reject(new Error(message.error || "download_worker_error"));
+  });
+
+  downloadWorker.addEventListener("error", (event) => {
+    const reason = event?.message || "download_worker_crashed";
+    for (const pending of workerPendingRequests.values()) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(new Error(reason));
+    }
+    workerPendingRequests.clear();
+    downloadWorker = null;
+  });
+
+  return downloadWorker;
+}
+
+async function callDownloadWorker(payload, transfer = []) {
+  const worker = getDownloadWorker();
+  const requestId = `dw_${crypto.randomUUID()}`;
+
+  return await new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      workerPendingRequests.delete(requestId);
+      reject(new Error("download_worker_timeout"));
+    }, 120000);
+
+    workerPendingRequests.set(requestId, { resolve, reject, timeoutId });
+
+    try {
+      worker.postMessage({ requestId, payload }, transfer);
+    } catch (error) {
+      clearTimeout(timeoutId);
+      workerPendingRequests.delete(requestId);
+      reject(error);
+    }
+  });
 }
 
 async function blobToDataUrl(blob) {

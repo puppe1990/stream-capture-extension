@@ -290,7 +290,30 @@ function renderJobs(jobs) {
     const mode = job.mode || "unknown";
     meta.textContent = `Progress: ${progress} | Mode: ${mode} | Job: ${job.jobId}`;
 
-    li.append(head, meta);
+    const progressWrap = document.createElement("div");
+    progressWrap.className = "progress-wrap";
+
+    const progressTrack = document.createElement("div");
+    progressTrack.className = "progress-track";
+
+    const progressFill = document.createElement("div");
+    progressFill.className = "progress-fill";
+    const progressValue = Number.isFinite(job.progress) ? Math.max(0, Math.min(100, Number(job.progress))) : 0;
+    progressFill.style.width = `${progressValue}%`;
+    if (job.status === "failed" || job.status === "cancelled") {
+      progressFill.classList.add("is-error");
+    }
+    if (job.status === "completed") {
+      progressFill.classList.add("is-done");
+    }
+    progressTrack.appendChild(progressFill);
+
+    const progressText = document.createElement("div");
+    progressText.className = "progress-text";
+    progressText.textContent = `${progressValue}%`;
+
+    progressWrap.append(progressTrack, progressText);
+    li.append(head, meta, progressWrap);
 
     if (job.error) {
       const error = document.createElement("div");
@@ -304,7 +327,7 @@ function renderJobs(jobs) {
       const reportActions = document.createElement("div");
       reportActions.className = "job-actions";
       const copyReport = document.createElement("button");
-      copyReport.className = "secondary";
+      copyReport.className = "btn secondary";
       copyReport.textContent = "Copy Report";
       copyReport.addEventListener("click", async () => {
         const report = buildFailureReport(job);
@@ -324,7 +347,7 @@ function renderJobs(jobs) {
       actions.className = "job-actions";
 
       const cancel = document.createElement("button");
-      cancel.className = "danger";
+      cancel.className = "btn danger";
       cancel.textContent = "Cancel";
       cancel.addEventListener("click", async () => {
         const response = await chrome.runtime.sendMessage({

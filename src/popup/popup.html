@@ -6,47 +6,51 @@
     <title>Media Capture</title>
     <link rel="stylesheet" href="./popup.css" />
   </head>
-  <body>
-    <main>
-      <header>
-        <h1>Media Capture</h1>
-        <p class="subtitle">Starter extension</p>
+  <body class="bg-slate-950 text-slate-100 overflow-x-hidden">
+    <main class="w-full min-w-[320px] max-w-[420px] p-3 grid gap-2.5">
+      <header class="hero">
+        <h1 class="m-0 text-base font-semibold tracking-wide">Media Capture</h1>
+        <p class="subtitle text-[11px] text-slate-400">Queue manager</p>
       </header>
 
-      <section class="panel">
-        <label for="plan">Plan</label>
-        <div class="row">
-          <select id="plan">
+      <section class="panel panel-tight rounded-xl border border-slate-700/80 bg-slate-900/80 p-2.5">
+        <div class="row row-spread flex items-center justify-between gap-2">
+          <label for="plan" class="text-xs text-slate-300">Plan</label>
+          <p id="plan-status" class="hint"></p>
+        </div>
+        <div class="row row-controls mt-2 flex items-center gap-2">
+          <select id="plan" class="h-8 rounded-md border border-slate-600 bg-slate-800 px-2 text-xs">
             <option value="premium">premium</option>
             <option value="enterprise">enterprise</option>
           </select>
-          <button id="save-plan">Save</button>
+          <button id="save-plan" class="btn btn-primary">Save</button>
         </div>
-        <p id="plan-status" class="hint"></p>
       </section>
 
-      <section class="panel">
-        <div class="row">
-          <button id="scan">Scan Current Tab</button>
-          <button id="clear-media">Clear Saved Media</button>
+      <section class="panel rounded-xl border border-slate-700/80 bg-slate-900/80 p-2.5">
+        <div class="panel-title mb-2 border-b border-slate-700 pb-1.5 text-xs text-slate-300">Detected Media</div>
+        <div class="row row-wrap media-actions flex flex-wrap items-center gap-2">
+          <button id="scan" class="btn btn-primary">Scan Current Tab</button>
+          <button id="clear-media" class="btn btn-muted">Clear Saved Media</button>
         </div>
         <p class="hint" id="scan-status"></p>
         <ul id="media-list"></ul>
       </section>
 
-      <section class="panel">
-        <div class="row">
-          <button id="refresh-jobs">Refresh Jobs</button>
+      <section class="panel rounded-xl border border-slate-700/80 bg-slate-900/80 p-2.5">
+        <div class="panel-title mb-2 border-b border-slate-700 pb-1.5 text-xs text-slate-300">Complete</div>
+        <div class="row flex items-center gap-2">
+          <button id="refresh-jobs" class="btn btn-primary">Refresh Jobs</button>
         </div>
-        <div class="row row-wrap">
-          <button id="clear-completed">Clear Completed</button>
-          <button id="clear-failed-cancelled">Clear Failed/Cancelled</button>
-          <button id="clear-terminal">Clear All Terminal</button>
+        <div class="row row-wrap job-actions-row mt-2 flex flex-wrap items-center gap-2">
+          <button id="clear-completed" class="btn btn-muted">Clear Completed</button>
+          <button id="clear-failed-cancelled" class="btn btn-muted">Clear Failed/Cancelled</button>
+          <button id="clear-terminal" class="btn btn-muted">Clear All Terminal</button>
         </div>
-        <div class="row">
-          <label for="retention-days">Retention (days)</label>
-          <input id="retention-days" type="number" min="0" max="365" />
-          <button id="save-retention">Save</button>
+        <div class="row row-controls mt-2 flex items-center gap-2">
+          <label for="retention-days" class="text-xs text-slate-300">Retention (days)</label>
+          <input id="retention-days" type="number" min="0" max="365" class="h-8 w-[70px] rounded-md border border-slate-600 bg-slate-800 px-2 text-xs" />
+          <button id="save-retention" class="btn btn-primary">Save</button>
         </div>
         <p class="hint" id="jobs-status"></p>
         <ul id="job-list"></ul>

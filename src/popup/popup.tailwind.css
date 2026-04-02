@@ -1,0 +1,127 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply m-0 overflow-x-hidden;
+    background:
+      radial-gradient(circle at top right, #1e2b42 0%, transparent 40%),
+      #121419;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex h-8 items-center justify-center rounded-md border px-2.5 text-xs whitespace-nowrap transition hover:brightness-110 active:translate-y-px;
+  }
+
+  .btn-primary {
+    @apply border-sky-400 bg-linear-to-b from-sky-400 to-sky-600 font-bold text-slate-950;
+  }
+
+  .btn-muted {
+    @apply border-slate-600 bg-slate-700 text-slate-100;
+  }
+
+  .hint {
+    @apply mt-2 text-[11px] text-slate-400;
+  }
+
+  #media-list,
+  #job-list {
+    @apply mt-2 grid max-h-[230px] list-none gap-2 overflow-auto p-0;
+  }
+
+  #media-list li,
+  #job-list li {
+    @apply overflow-hidden rounded-lg border border-slate-700 bg-slate-800 p-2 text-xs;
+  }
+
+  #media-list .title-row {
+    @apply mb-1 flex items-center justify-between gap-2;
+  }
+
+  #media-list .title {
+    @apply font-bold text-slate-100;
+  }
+
+  #media-list .meta {
+    @apply mb-1.5 break-words text-slate-400;
+  }
+
+  #media-list .download {
+    @apply inline-flex h-8 w-full items-center justify-center rounded-md border border-sky-400 bg-linear-to-b from-sky-400 to-sky-600 px-2 text-[11px] font-bold text-slate-950 whitespace-nowrap transition hover:brightness-110 active:translate-y-px;
+  }
+
+  #media-list .blob-badge {
+    @apply rounded-full bg-cyan-700 px-2 py-px text-[10px] tracking-wide text-cyan-100 uppercase;
+  }
+
+  .job-head {
+    @apply mb-1.5 flex items-center justify-between;
+  }
+
+  .pill {
+    @apply rounded-full px-2 py-0.5 text-[10px] tracking-wide uppercase text-slate-950;
+  }
+
+  .pill.queued {
+    @apply bg-amber-300;
+  }
+
+  .pill.downloading {
+    @apply bg-sky-300;
+  }
+
+  .pill.completed {
+    @apply bg-emerald-300;
+  }
+
+  .pill.failed,
+  .pill.cancelled {
+    @apply bg-rose-300;
+  }
+
+  .job-actions {
+    @apply mt-2;
+  }
+
+  .progress-wrap {
+    @apply mt-2 grid gap-1;
+  }
+
+  .progress-track {
+    @apply h-2 overflow-hidden rounded-full border border-slate-600 bg-slate-900;
+  }
+
+  .progress-fill {
+    @apply h-full rounded-full bg-linear-to-r from-cyan-400 to-sky-500 transition-all duration-300;
+  }
+
+  .progress-fill.is-error {
+    @apply from-rose-400 to-rose-500;
+  }
+
+  .progress-fill.is-done {
+    @apply from-emerald-400 to-emerald-500;
+  }
+
+  .progress-text {
+    @apply text-right text-[10px] text-slate-400;
+  }
+
+  .danger {
+    @apply w-full border border-rose-300 bg-linear-to-b from-rose-400 to-rose-500 font-bold text-rose-950;
+  }
+
+  .secondary {
+    @apply w-full border border-slate-500 bg-slate-700 text-slate-100;
+  }
+
+  .media-actions > .btn {
+    @apply flex-1 min-w-[140px];
+  }
+
+  .job-actions-row > .btn {
+    @apply flex-1 min-w-[160px];
+  }
+}
